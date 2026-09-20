@@ -209,13 +209,13 @@ To override the automatic choice, set `agent.image_input_mode` in `config.yaml`:
 
 | Value | Behavior |
 |-------|----------|
-| `auto` (default) | Native pixels when the model reports vision support, `vision_analyze` description otherwise. Configuring an explicit `auxiliary.vision` backend (a `provider` other than `auto`, or a `model` / `base_url`) also selects the description path, even for a vision-capable main model. |
+| `auto` (default) | Native pixels when the model reports vision support, `vision_analyze` description otherwise. |
 | `native` | Always attach pixels, even when the catalog says the model is text-only. |
 | `text` | Always route images through the `vision_analyze` describer, never attach pixels to the main request. |
 
-This is the knob to reach for when a backend accepts text but rejects native image input (for example an `openai-codex` account whose backend answers image requests with `server_error`): keep your main model and point `auxiliary.vision` at a different vision-capable provider and model (with `auxiliary.vision.provider: auto` the describer would auto-detect the same main model again). That alone switches images to the description path in `auto` mode; `agent.image_input_mode: text` makes the same choice explicit.
+This is the knob to reach for when a backend accepts text but rejects native image input (for example an `openai-codex` account whose backend answers image requests with `server_error`): set `agent.image_input_mode: text` and point `auxiliary.vision` at a vision-capable provider and model (with `auxiliary.vision.provider: auto` the describer would auto-detect the same main model again). Configuring `auxiliary.vision` on its own is *not* enough — it only names the describer.
 
-Which auxiliary model handles the text-description path is configurable under `auxiliary.vision` — see [Auxiliary Models](../configuration.md#auxiliary-models).
+Which auxiliary model handles the text-description path is configurable under `auxiliary.vision` — see [Auxiliary Models](../configuration.md#auxiliary-models). Configuring `auxiliary.vision` only picks that fallback describer; it does not route vision-capable models away from native pixels. If you want *every* image to go through the describer (for example to keep large screenshots out of context), set `agent.image_input_mode: text`.
 
 ### `vision_analyze` has the same dual behavior
 

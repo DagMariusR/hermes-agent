@@ -75,9 +75,10 @@ def test_home_keyed_caches_serve_each_profile_its_own_config(tmp_path, monkeypat
     main = {"model": {"provider": "openai", "model": "gpt-4o"}}
     a = _make_home(tmp_path / "A", {**main,
                                     "auxiliary": {"vision": {"provider": "auto"}, "summary": {"max_concurrency": 2}}})
-    b = _make_home(tmp_path / "A" / "profiles" / "B", {**main,
-                                                       "auxiliary": {"vision": {"provider": "openai", "model": "gpt-4o-mini"},
-                                                                     "summary": {"max_concurrency": 7}}})
+    b = _make_home(tmp_path / "A" / "profiles" / "B",
+                   {"model": {"provider": "openai", "model": "gpt-4o", "supports_vision": False},
+                    "auxiliary": {"vision": {"provider": "openai", "model": "gpt-4o-mini"},
+                                  "summary": {"max_concurrency": 7}}})
     monkeypatch.setenv("HERMES_HOME", str(a))
     (a / "cache" / "image_token_costs.json").write_text(json.dumps({"m@gw.example": 1000}), encoding="utf-8")
     (b / "cache" / "image_token_costs.json").write_text(json.dumps({"m@gw.example": 3000}), encoding="utf-8")
@@ -90,7 +91,7 @@ def test_home_keyed_caches_serve_each_profile_its_own_config(tmp_path, monkeypat
     ac._reset_aux_semaphores()
 
     with _scoped(a):
-        assert cu._should_route_through_aux_vision() is False  # no explicit aux vision: native path
+        assert cu._should_route_through_aux_vision() is False  # no user-declared override: vision-capable main keeps the envelope
         assert itc.learned_image_token_cost("m", "http://gw.example/v1") == 1000
         sem_a = ac._acquire_sync_aux_semaphore("summary")
         sem_a.acquire()
@@ -98,7 +99,7 @@ def test_home_keyed_caches_serve_each_profile_its_own_config(tmp_path, monkeypat
         lock_a = cookie._fh.name
         cookie.release()
     with _scoped(b):
-        assert cu._should_route_through_aux_vision() is True  # B named a dedicated vision model
+        assert cu._should_route_through_aux_vision() is True  # B declares its main model text-only
         assert itc.learned_image_token_cost("m", "http://gw.example/v1") == 3000
         sem_b = ac._acquire_sync_aux_semaphore("summary")
         cookie = mcp_tool_loop._try_acquire_mcp_discovery_lock()
