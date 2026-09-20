@@ -10,7 +10,6 @@ from unittest.mock import patch
 from agent.image_routing import (
     _coerce_capability_bool,
     _coerce_mode,
-    _explicit_aux_vision_override,
     _lookup_supports_vision,
     _should_probe_ollama_vision,
     _supports_vision_override,
@@ -36,22 +35,6 @@ class TestCoerceMode:
         assert _coerce_mode(42) == "auto"
 
 
-
-# ─── _explicit_aux_vision_override ───────────────────────────────────────────
-
-
-class TestExplicitAuxVisionOverride:
-    def test_none_config(self):
-        assert _explicit_aux_vision_override(None) is False
-
-    def test_empty_config(self):
-        assert _explicit_aux_vision_override({}) is False
-
-
-
-
-
-
 # ─── decide_image_input_mode ─────────────────────────────────────────────────
 
 
@@ -60,18 +43,26 @@ class TestDecideImageInputMode:
 
 
 
+
     def test_auto_with_unknown_model(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
             assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
 
-    def test_auto_explicit_aux_backend_is_the_defacto_route(self):
-        """Maintainer decision (2026-08-28, reverses #29135): a user who
-        NAMED a dedicated vision backend wants it used — even when the
-        main model has native vision. Config that only takes effect when
-        the main model gets worse is a trap, not a setting."""
+    def test_auto_explicit_aux_backend_is_the_fallback_describer(self):
+        """Reserve contract: an explicitly configured ``auxiliary.vision``
+        backend is the fallback describer for the text path — it never
+        forces text on its own. A vision-capable main model still gets
+        native attach; routing every image through the describer requires
+        ``agent.image_input_mode: text``."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
-            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "text"
+            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
+
+    def test_auto_lookup_false_is_text(self):
+        """``supports_vision`` resolving False (config override or catalog)
+        routes text even for a provider/model pair that might look capable."""
+        with patch("agent.image_routing._lookup_supports_vision", return_value=False):
+            assert decide_image_input_mode("anthropic", "claude-sonnet-4", {}) == "text"
 
     def test_auto_unset_aux_backend_native_remains_default(self):
         """No configured aux backend -> native for vision-capable mains
@@ -80,13 +71,13 @@ class TestDecideImageInputMode:
             with patch("agent.image_routing._lookup_supports_vision", return_value=True):
                 assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
 
-    def test_image_input_mode_native_overrides_aux_backend(self):
-        """agent.image_input_mode: native stays the absolute escape hatch —
-        forces native attach even with an explicit aux backend."""
-        cfg = {"agent": {"image_input_mode": "native"},
+    def test_image_input_mode_text_is_the_always_aux_escape_hatch(self):
+        """agent.image_input_mode: text forces the describer path even for a
+        vision-capable main model — the only way to always route through aux."""
+        cfg = {"agent": {"image_input_mode": "text"},
                "auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
-            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
+            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "text"
 
 
     def test_none_config_is_auto(self):

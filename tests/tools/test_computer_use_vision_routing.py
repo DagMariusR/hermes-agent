@@ -6,6 +6,13 @@ should be returned as a multimodal envelope (main model handles vision
 natively) or pre-analysed via the ``auxiliary.vision`` pipeline so the
 main model only sees text.
 
+Contract: ``auxiliary.vision`` is the fallback describer for the aux path —
+it never wins the decision. Decision order: a user-declared
+``supports_vision=False`` routes aux immediately, then required tool-result
+support gates ahead of any user-declared ``True``, then the user-declared
+``True`` keeps the envelope, then a required ``supports_vision=True``;
+routing every capture through aux requires ``agent.image_input_mode: text``.
+
 The companion end-to-end regression for #24015 lives in
 ``tests/tools/test_computer_use_capture_routing.py``; this file pins the
 unit contract of the helper in isolation so behaviour does not regress
@@ -20,62 +27,18 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# _explicit_aux_vision_override
-# ---------------------------------------------------------------------------
-
-class TestExplicitAuxVisionOverride:
-    """Mirror agent.image_routing — config detection must agree across paths."""
-
-    def test_returns_false_for_none_cfg(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        assert _explicit_aux_vision_override(None) is False
-
-    def test_returns_false_for_non_dict_cfg(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        assert _explicit_aux_vision_override("not-a-dict") is False
-        assert _explicit_aux_vision_override([]) is False
-
-    def test_returns_false_when_auxiliary_block_missing(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        assert _explicit_aux_vision_override({}) is False
-        assert _explicit_aux_vision_override({"model": {"default": "x"}}) is False
-
-    def test_returns_false_when_vision_block_missing(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"compression": {"provider": "openai"}}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-
-    def test_returns_true_for_provider_auto_plus_explicit_model(self):
-        """``provider: auto`` + an explicit model still counts as override."""
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {
-            "auxiliary": {
-                "vision": {"provider": "auto", "model": "claude-3-haiku"},
-            }
-        }
-        assert _explicit_aux_vision_override(cfg) is True
-
-    def test_handles_non_dict_vision_block(self):
-        from tools.computer_use.vision_routing import _explicit_aux_vision_override
-        cfg = {"auxiliary": {"vision": "not-a-dict"}}
-        assert _explicit_aux_vision_override(cfg) is False
-
-
-# ---------------------------------------------------------------------------
 # should_route_capture_to_aux_vision
 # ---------------------------------------------------------------------------
 
 class TestRouteDecision:
-    """End-to-end policy: explicit override > tool-result support > vision caps."""
+    """End-to-end policy: user-declared False > tool-result support > user-declared True > vision caps."""
 
-    def test_explicit_override_routes_to_aux_even_for_vision_main(self):
-        """Issue #24015 core repro: explicit aux config must win.
-
-        Even if the main model fully supports vision (Anthropic / Claude),
-        an explicit ``auxiliary.vision`` block means the user wants their
-        configured backend used. Don't silently bypass it.
-        """
+    def test_explicit_aux_config_does_not_win(self):
+        """Reserve contract: an explicit ``auxiliary.vision`` backend is the
+        fallback describer, never a routing trigger. A vision-capable main
+        model with working tool-result support keeps the multimodal envelope;
+        routing every capture through aux requires ``agent.image_input_mode:
+        text``."""
         from tools.computer_use import vision_routing
 
         cfg = {
@@ -91,7 +54,7 @@ class TestRouteDecision:
                           return_value=True):
             assert vision_routing.should_route_capture_to_aux_vision(
                 "anthropic", "claude-opus-4-5", cfg
-            ) is True
+            ) is False
 
     def test_non_vision_main_model_routes_to_aux(self):
         """The reported #24015 scenario: tencent/hy3-preview has no vision."""
@@ -103,6 +66,20 @@ class TestRouteDecision:
                           return_value=False):
             assert vision_routing.should_route_capture_to_aux_vision(
                 "openrouter", "tencent/hy3-preview", cfg
+            ) is True
+
+    def test_user_declared_false_routes_to_aux(self):
+        """``supports_vision: False`` routes aux even when the provider would
+        accept multimodal tool results."""
+        from tools.computer_use import vision_routing
+
+        cfg = {"model": {"supports_vision": False}}
+        with patch.object(vision_routing, "_lookup_supports_vision", return_value=True), \
+             patch.object(vision_routing,
+                          "_provider_accepts_multimodal_tool_result",
+                          return_value=True):
+            assert vision_routing.should_route_capture_to_aux_vision(
+                "custom", "text-only-model", cfg
             ) is True
 
     def test_vision_main_model_no_override_keeps_multimodal(self):
@@ -117,8 +94,10 @@ class TestRouteDecision:
             ) is False
 
 
-    def test_user_declared_vision_support_keeps_custom_provider_native(self):
-        """Local/custom VLMs use config as their tool-result image escape hatch."""
+    def test_provider_rejecting_tool_results_routes_aux_even_when_user_declared_true(self):
+        """The provider tool-result gate outranks a user-declared ``True``:
+        without multimodal tool-result support the envelope would hard-fail
+        downstream, so it routes aux even for a config-declared vision model."""
         from tools.computer_use import vision_routing
 
         cfg = {
@@ -133,6 +112,22 @@ class TestRouteDecision:
                           return_value=False):
             assert vision_routing.should_route_capture_to_aux_vision(
                 "custom", "Qwen3.6-35B-A3B-local-vlm", cfg
+            ) is True
+
+    def test_user_declared_true_with_provider_support_keeps_native(self):
+        """With tool-result support proven, a user-declared ``supports_vision:
+        True`` keeps the multimodal envelope without consulting the catalog
+        (the ``_lookup_supports_vision`` False stub fails the test if the
+        decision wrongly falls through to the catalog lookup)."""
+        from tools.computer_use import vision_routing
+
+        cfg = {"model": {"supports_vision": True}}
+        with patch.object(vision_routing, "_lookup_supports_vision", return_value=False), \
+             patch.object(vision_routing,
+                          "_provider_accepts_multimodal_tool_result",
+                          return_value=True):
+            assert vision_routing.should_route_capture_to_aux_vision(
+                "custom", "local-vlm", cfg
             ) is False
 
 
@@ -148,8 +143,10 @@ class TestRouteDecision:
             ) is True
 
 
-    def test_explicit_override_wins_over_unknown_caps(self):
-        """Explicit aux config wins regardless of unknown caps elsewhere."""
+    def test_unknown_caps_fail_closed_even_with_explicit_aux_config(self):
+        """An explicit aux.vision block neither wins nor rescues: with every
+        capability lookup unknown the fail-closed default (aux) still applies,
+        because the screenshot cannot be proven safe to attach."""
         from tools.computer_use import vision_routing
 
         cfg = {"auxiliary": {"vision": {"provider": "openrouter"}}}
@@ -189,7 +186,7 @@ class TestModuleSurface:
         assert callable(vision_routing.should_route_capture_to_aux_vision)
 
     @pytest.mark.parametrize("name", [
-        "_explicit_aux_vision_override",
+        "_lookup_supports_vision",
         "_provider_accepts_multimodal_tool_result",
     ])
     def test_internal_helpers_are_addressable(self, name):

@@ -3,10 +3,12 @@
 ``native`` attaches images as OpenAI-style ``image_url`` parts; ``text`` runs
 ``vision_analyze`` up-front and prepends the lossy description (right for
 non-vision models). :func:`decide_image_input_mode` picks once per turn from
-``agent.image_input_mode`` (``auto`` | ``native`` | ``text``): in ``auto`` an
-explicit ``auxiliary.vision`` backend forces ``text`` even for vision-capable
-main models (``native`` is the absolute override); else ``supports_vision``
-(config override or catalog) decides. ``vision_analyze`` stays a tool regardless.
+``agent.image_input_mode`` (``auto`` | ``native`` | ``text``): in ``auto`` the
+main model's ``supports_vision`` (config override or catalog) decides —
+``native`` only when it is True, else ``text``. ``auxiliary.vision`` is the
+fallback describer for the ``text`` path, never a routing trigger; routing
+every image through text requires an explicit ``agent.image_input_mode: text``.
+``vision_analyze`` stays a tool regardless.
 """
 
 from __future__ import annotations
@@ -251,18 +253,6 @@ def _coerce_mode(raw: Any) -> str:
     return mode if mode in _VALID_MODES else "auto"
 
 
-def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when the user configured a specific ``auxiliary.vision`` backend — the
-    de-facto image route in ``auto`` mode even when the main model has native vision.
-    ``auto``/empty provider with no model and no base_url is not explicit."""
-    vision = _dict_or_empty(_dict_or_empty(_dict_or_empty(cfg).get("auxiliary")).get("vision"))
-    return bool(vision) and not (
-        _clean_str(vision.get("provider")).lower() in {"", "auto"}
-        and not _clean_str(vision.get("model"))
-        and not _clean_str(vision.get("base_url"))
-    )
-
-
 def _probe_managed_runtime(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
     """Managed local runtime verdict: the server receiving the image is the authority
     on whether it can see (its /props reports modalities). Cloud catalogs have never
@@ -368,12 +358,14 @@ def decide_image_input_mode(
     requested_provider: str = "",
 ) -> str:
     """Return ``"native"`` or ``"text"`` for the given turn (``cfg`` None behaves as
-    auto; ``requested_provider`` is the identity before runtime canonicalization)."""
+    auto; ``requested_provider`` is the identity before runtime canonicalization).
+
+    ``auxiliary.vision`` is the fallback describer for the ``text`` path — it never
+    forces text on its own. Routing every image through the describer requires an
+    explicit ``agent.image_input_mode: text``."""
     mode_cfg = _coerce_mode(_dict_or_empty(_dict_or_empty(cfg).get("agent")).get("image_input_mode"))
     if mode_cfg != "auto":
         return mode_cfg
-    if _explicit_aux_vision_override(cfg):  # auto: an explicit auxiliary.vision backend wins
-        return "text"
     # Keep the three-argument call contract for callers/tests that replace the lookup hook.
     extra = {"requested_provider": requested_provider} if requested_provider else {}
     return "native" if _lookup_supports_vision(provider, model, cfg, **extra) is True else "text"
