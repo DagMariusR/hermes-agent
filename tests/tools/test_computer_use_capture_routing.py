@@ -259,10 +259,11 @@ def _route(provider, model, cfg, *, catalog, provider_takes_media, veto=False):
 class TestRouteDecision:
     """True = pre-analyse via auxiliary.vision, False = the multimodal envelope (#115248)."""
 
-    def test_explicit_aux_backend_wins_over_a_vision_main_model(self):
-        """#24015: a configured auxiliary.vision backend is the de-facto image route in auto mode."""
+    def test_explicit_aux_backend_does_not_win_over_a_vision_main_model(self):
+        """Fork contract: auxiliary.vision is the fallback describer for the aux path, never a routing trigger;
+        routing every capture through aux requires ``agent.image_input_mode: text``."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
-        assert _route("anthropic", "claude-opus-4-5", cfg, catalog=True, provider_takes_media=True) is True
+        assert _route("anthropic", "claude-opus-4-5", cfg, catalog=True, provider_takes_media=True) is False
 
     def test_vision_main_model_without_aux_backend_stays_native(self):
         assert _route("anthropic", "claude-opus-4-5", {}, catalog=True, provider_takes_media=True) is False
@@ -286,3 +287,13 @@ class TestRouteDecision:
 
     def test_profile_veto_routes_a_vision_model_to_aux(self):
         assert _route("xiaomi", "mimo-v2.5", {}, catalog=True, provider_takes_media=False, veto=True) is True
+
+    def test_transport_veto_outranks_a_vision_capable_catalog(self):
+        """The shared gate ORs transport with the catalog; the capture lane must not. A vision model behind a
+        provider that cannot carry tool-result media is the hard 400/404 this lane exists to stop."""
+        cfg = {"agent": {"image_input_mode": "native"}}
+        assert _route("exotic-provider", "some-vlm", cfg, catalog=True, provider_takes_media=False) is True
+
+    def test_transport_veto_outranks_a_user_declared_true(self):
+        with patch("agent.image_routing._supports_vision_override", return_value=True):
+            assert _route("exotic-provider", "some-vlm", {}, catalog=True, provider_takes_media=False) is True
