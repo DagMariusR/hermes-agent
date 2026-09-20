@@ -9,6 +9,12 @@ main model's ``supports_vision`` (config override or catalog) decides —
 fallback describer for the ``text`` path, never a routing trigger; routing
 every image through text requires an explicit ``agent.image_input_mode: text``.
 ``vision_analyze`` stays a tool regardless.
+
+Reporting tools that must tell a *confirmed* text-only model apart from an
+*unknown* one (and either from an explicit policy choice) use
+:func:`resolve_image_input_decision`, which returns an :class:`ImageInputDecision`
+with ``mode`` / ``supports_vision`` / ``reason`` intact; the wrapper collapses
+False and unknown to the same safe ``text`` route.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import mimetypes
 import os
 import re
 from contextlib import suppress
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -350,6 +357,67 @@ def _lookup_supports_vision(
     return None
 
 
+# Machine-readable reason codes for :class:`ImageInputDecision`. Consumers
+# (e.g. vision precondition reporters) branch on these instead of parsing the
+# wrapper's collapsed string, so "confirmed text-only" and "could not tell"
+# are never reported as the same fact.
+REASON_EXPLICIT_NATIVE = "explicit_native_policy"
+REASON_EXPLICIT_TEXT = "explicit_text_policy"
+REASON_AUTO_VISION_CONFIRMED = "auto_vision_confirmed"
+REASON_AUTO_TEXT_ONLY_CONFIRMED = "auto_text_only_confirmed"
+REASON_AUTO_VISION_UNKNOWN = "auto_vision_unknown_fail_closed"
+
+
+@dataclass(frozen=True)
+class ImageInputDecision:
+    """Structured, immutable outcome of the per-turn image input decision.
+
+    ``mode`` is the routing verdict (``"native"`` | ``"text"``) — exactly what
+    :func:`decide_image_input_mode` returns. ``supports_vision`` carries the
+    resolved capability verdict — True (vision confirmed), False (text-only
+    confirmed) or None (unknown) — and stays None for the explicit-policy
+    outcomes, which never consult capability. ``reason`` stamps which of the
+    five outcomes fired, keeping False and None distinguishable although the
+    string wrapper routes both to ``text``.
+    """
+
+    mode: str
+    supports_vision: Optional[bool]
+    reason: str
+
+
+def resolve_image_input_decision(
+    provider: str,
+    model: str,
+    cfg: Optional[Dict[str, Any]],
+    *,
+    requested_provider: str = "",
+) -> ImageInputDecision:
+    """Structured form of :func:`decide_image_input_mode` for reporting tools.
+
+    Same decision, minus the collapse: the wrapper maps both a confirmed
+    text-only model and an unknown one to ``"text"``, while this keeps the
+    ``supports_vision`` verdict (True / False / None) intact and stamps
+    ``reason`` with which outcome fired. Explicit ``agent.image_input_mode``
+    values are policy choices — ``supports_vision`` stays None and no
+    capability lookup runs at all. No new probes or network behavior: the
+    verdict comes from the same :func:`_lookup_supports_vision` chain, with
+    ``requested_provider`` forwarded unchanged.
+    """
+    mode_cfg = _coerce_mode(_dict_or_empty(_dict_or_empty(cfg).get("agent")).get("image_input_mode"))
+    if mode_cfg != "auto":
+        reason = REASON_EXPLICIT_NATIVE if mode_cfg == "native" else REASON_EXPLICIT_TEXT
+        return ImageInputDecision(mode=mode_cfg, supports_vision=None, reason=reason)
+    # Keep the three-argument call contract for callers/tests that replace the lookup hook.
+    extra = {"requested_provider": requested_provider} if requested_provider else {}
+    supports_vision = _lookup_supports_vision(provider, model, cfg, **extra)
+    if supports_vision is True:
+        return ImageInputDecision(mode="native", supports_vision=True, reason=REASON_AUTO_VISION_CONFIRMED)
+    if supports_vision is False:
+        return ImageInputDecision(mode="text", supports_vision=False, reason=REASON_AUTO_TEXT_ONLY_CONFIRMED)
+    return ImageInputDecision(mode="text", supports_vision=None, reason=REASON_AUTO_VISION_UNKNOWN)
+
+
 def decide_image_input_mode(
     provider: str,
     model: str,
@@ -362,13 +430,10 @@ def decide_image_input_mode(
 
     ``auxiliary.vision`` is the fallback describer for the ``text`` path — it never
     forces text on its own. Routing every image through the describer requires an
-    explicit ``agent.image_input_mode: text``."""
-    mode_cfg = _coerce_mode(_dict_or_empty(_dict_or_empty(cfg).get("agent")).get("image_input_mode"))
-    if mode_cfg != "auto":
-        return mode_cfg
-    # Keep the three-argument call contract for callers/tests that replace the lookup hook.
-    extra = {"requested_provider": requested_provider} if requested_provider else {}
-    return "native" if _lookup_supports_vision(provider, model, cfg, **extra) is True else "text"
+    explicit ``agent.image_input_mode: text``. Reporting tools that need to know WHY
+    (confirmed text-only vs unknown vs explicit policy) use
+    :func:`resolve_image_input_decision` instead of parsing this collapse."""
+    return resolve_image_input_decision(provider, model, cfg, requested_provider=requested_provider).mode
 
 
 # Image size handling is REACTIVE: attach at full size and let
@@ -543,4 +608,15 @@ def build_native_content_parts(
     return [{"type": "text", "text": combined_text}, *image_parts], skipped
 
 
-__all__ = ["decide_image_input_mode", "build_native_content_parts", "extract_image_refs"]
+__all__ = [
+    "ImageInputDecision",
+    "REASON_AUTO_TEXT_ONLY_CONFIRMED",
+    "REASON_AUTO_VISION_CONFIRMED",
+    "REASON_AUTO_VISION_UNKNOWN",
+    "REASON_EXPLICIT_NATIVE",
+    "REASON_EXPLICIT_TEXT",
+    "build_native_content_parts",
+    "decide_image_input_mode",
+    "extract_image_refs",
+    "resolve_image_input_decision",
+]
