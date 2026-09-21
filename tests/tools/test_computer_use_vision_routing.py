@@ -198,17 +198,23 @@ class TestModuleSurface:
 
 
 class TestGateAgreementWithVisionAnalyze:
-    """The capture route and the ``vision_analyze`` fast path derive from one predicate, so the lane never
-    depends on which tool asked (#115248: deepseek/deepseek-flash went native in one and aux in the other)."""
+    """#115248 asked for one predicate behind both lanes so the route never depends on which tool asked.
+    The capture lane keeps that goal but resolves the disagreements in the *fail-closed* direction, which
+    ``tools.vision_tools._accepts_tool_result_images`` does not: that helper ORs the transport whitelist with
+    the capability catalog, so it answers True when only one of the two is known. Sending a screenshot the
+    receiver cannot read is a hard 400/404; one extra aux call is not. The module docstring already promises
+    to fail closed on missing or ambiguous metadata — these tests pin that promise for the capture lane."""
 
-    def test_catalog_vision_model_off_the_provider_whitelist_stays_native(self):
+    def test_catalog_vision_model_off_the_provider_whitelist_routes_to_aux(self):
+        """Catalog says the model sees, but the provider cannot carry images inside tool results. Transport is
+        an inviolable gate: the envelope would 400 regardless of what the model can do."""
         from tools.computer_use import vision_routing
 
         cfg = {"agent": {"image_input_mode": "native"}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True), \
              patch("tools.vision_tools._supports_media_in_tool_results", return_value=False), \
              patch("tools.vision_tools._profile_rejects_tool_media", return_value=False):
-            assert vision_routing.should_route_capture_to_aux_vision("deepseek", "deepseek-flash", cfg) is False
+            assert vision_routing.should_route_capture_to_aux_vision("deepseek", "deepseek-flash", cfg) is True
 
     def test_profile_veto_still_routes_a_catalog_vision_model_to_aux(self):
         from tools.computer_use import vision_routing
@@ -218,10 +224,13 @@ class TestGateAgreementWithVisionAnalyze:
              patch("tools.vision_tools._profile_rejects_tool_media", return_value=True):
             assert vision_routing.should_route_capture_to_aux_vision("xiaomi", "mimo-v2.5", {}) is True
 
-    def test_whitelisted_provider_with_catalog_unknown_model_matches_vision_analyze(self):
-        """provider on the tool-result-media whitelist, model absent from models.dev/config (a proxy alias):
-        vision_analyze embeds natively, so capture must stay native too instead of demanding a second
-        ``supports_vision is True`` from the catalog (review follow-up)."""
+    def test_whitelisted_provider_with_catalog_unknown_model_routes_to_aux(self):
+        """Transport is proven, capability is unknown (a proxy alias absent from models.dev and config).
+        ``_accepts_tool_result_images`` answers True here on transport alone, so ``vision_analyze`` embeds
+        natively while capture routes to aux — the two lanes DO diverge in this case, deliberately.
+        "Unknown" is not "yes": an unrecognised alias may well be a text-only model, and the capture lane
+        will not gamble a hard failure on it. The durable fix is to make the shared gate AND its two inputs
+        instead of ORing them, which would pull ``vision_analyze`` into the same fail-closed posture."""
         from tools.computer_use import vision_routing
         from tools.vision_tools import _accepts_tool_result_images
 
@@ -230,4 +239,4 @@ class TestGateAgreementWithVisionAnalyze:
              patch("tools.vision_tools._supports_media_in_tool_results", return_value=True), \
              patch("tools.vision_tools._profile_rejects_tool_media", return_value=False):
             assert _accepts_tool_result_images("anthropic", "my-proxy-claude", cfg) is True
-            assert vision_routing.should_route_capture_to_aux_vision("anthropic", "my-proxy-claude", cfg) is False
+            assert vision_routing.should_route_capture_to_aux_vision("anthropic", "my-proxy-claude", cfg) is True
