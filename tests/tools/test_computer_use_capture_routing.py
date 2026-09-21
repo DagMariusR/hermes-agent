@@ -297,3 +297,9 @@ class TestRouteDecision:
     def test_transport_veto_outranks_a_user_declared_true(self):
         with patch("agent.image_routing._supports_vision_override", return_value=True):
             assert _route("exotic-provider", "some-vlm", {}, catalog=True, provider_takes_media=False) is True
+
+    def test_whitelisted_provider_with_catalog_unknown_model_fails_closed_in_auto(self):
+        """Transport is proven, capability is unknown (a proxy alias absent from models.dev and config).
+        "Unknown" is not "yes": in auto mode the capture lane will not gamble a hard failure on it;
+        ``image_input_mode: native`` is the user's explicit word for keeping such an alias native."""
+        assert _route("anthropic", "my-proxy-claude", {}, catalog=None, provider_takes_media=True) is True
