@@ -2020,16 +2020,12 @@ class MatrixAdapter(BasePlatformAdapter):
         if msgtype == "m.notice" and not self._process_notices:
             return
         # Dispatch by msgtype.
-        media_msgtypes = ("m.image", "m.audio", "m.video", "m.file", "m.location")
-        if msgtype in media_msgtypes:
-            if msgtype == "m.location":
-                await self._handle_location_message(
-                    room_id, sender, event_id, event_ts, source_content, relates_to
-                )
-            else:
-                await self._handle_media_message(
-                    room_id, sender, event_id, event_ts, source_content, relates_to, msgtype
-                )
+        if msgtype in ("m.image", "m.audio", "m.video", "m.file"):
+            await self._handle_media_message(room_id, sender, event_id, event_ts, source_content, relates_to, msgtype)
+        elif msgtype == "m.location":
+            await self._handle_location_message(
+                room_id, sender, event_id, event_ts, source_content, relates_to
+            )
         elif msgtype in ("m.text", "m.notice"):
             await self._handle_text_message(room_id, sender, event_id, event_ts, source_content, relates_to)
 
@@ -2080,8 +2076,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
         # Build a human-readable location text for the agent.
         if lat is not None and lon is not None:
-            label = body.strip() if body and body.strip() else "Delt posisjon"
-            location_text = f"{label}\nKoordinater: {lat}, {lon}"
+            label = body.strip() if body and body.strip() else "Shared location"
+            location_text = f"{label}\nCoordinates: {lat}, {lon}"
         elif body and body.strip():
             # No parseable coordinates — pass the body through as-is.
             location_text = body.strip()
